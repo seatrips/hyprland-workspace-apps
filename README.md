@@ -107,7 +107,7 @@ workspace-apps --activate
 For example, bind it in `~/.config/hypr/bindings.lua` (Omarchy):
 
 ```lua
-o.bind("SUPER + SHIFT + W", "Activate workspace apps", os.getenv("HOME") .. "/.local/bin/workspace-apps --activate")
+o.bind("SUPER + ALT + W", "Activate workspace apps", os.getenv("HOME") .. "/.local/bin/workspace-apps --activate")
 ```
 
 ### Moving and removing
