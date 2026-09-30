@@ -55,8 +55,14 @@ CSS = """
 }
 .chip:hover { background: alpha(currentColor, 0.14); }
 .chip button { min-width: 26px; min-height: 26px; padding: 0; }
+.chip button:checked { color: white; background-color: #26a269; }
 .app-row { padding: 6px 4px; }
 .hint { opacity: 0.7; }
+switch.login-switch { background-color: #c01c28; }
+switch.login-switch:checked { background-color: #26a269; }
+switch.login-switch slider { background-color: white; }
+.login-on { color: #33d17a; font-weight: 700; }
+.login-off { color: #f66151; font-weight: 700; }
 """
 
 
@@ -112,11 +118,13 @@ class State:
     def __init__(self):
         self.apps = {}  # desktop id -> {workspace, autostart, class}
         self.return_to = 1
+        self.autostart_enabled = True  # master switch for "launch at login"
         try:
             with open(STATE_FILE) as f:
                 data = json.load(f)
             self.apps = data.get("apps", {})
             self.return_to = data.get("return_to", 1)
+            self.autostart_enabled = data.get("autostart_enabled", True)
         except (OSError, ValueError):
             pass
         for cfg in self.apps.values():  # older files stored a single "workspace"
@@ -129,7 +137,8 @@ class State:
 
     def save(self):
         with open(STATE_FILE, "w") as f:
-            json.dump({"return_to": self.return_to, "apps": self.apps}, f, indent=2)
+            json.dump({"return_to": self.return_to, "autostart_enabled": self.autostart_enabled,
+                       "apps": self.apps}, f, indent=2)
 
 
 def launch_cmd(*argv):
@@ -165,7 +174,7 @@ def write_lua(state, names):
     startup = []
     if state.has_multi():
         startup += ["  -- Moves 2nd/3rd/... windows of multi-workspace apps", f"  hl.exec_cmd({lua_str(daemon_cmd())})"]
-    autostart = [a for a, c in by_ws if c.get("autostart")]
+    autostart = [a for a, c in by_ws if c.get("autostart")] if state.autostart_enabled else []
     if autostart:
         startup.append("  -- Launch at login")
         startup += [f"  hl.exec_cmd({lua_str(launch_cmd(a))})" for a in autostart]
@@ -192,6 +201,45 @@ def ensure_included():
         text = text.rstrip("\n") + f"\n\n{INCLUDE_LINE}\n"
     with open(MAIN_CONF, "w") as f:
         f.write(text)
+
+
+def activate_now(state):
+    """Start the ▶ apps that aren't running and move open windows to their workspaces.
+
+    Returns (launched, moved) counts. Needs the window rules to be loaded already
+    (i.e. after a save), so freshly launched apps land on their workspace.
+    """
+    try:
+        clients = hypr_json("clients")
+        mons = {m["id"]: (m["width"] / m["scale"], m["height"] / m["scale"]) for m in hypr_json("monitors")}
+    except Exception:
+        return 0, 0
+    launched = moved = 0
+    for app_id, cfg in state.apps.items():
+        try:
+            rx = re.compile(cfg.get("class") or "(?!)")
+        except re.error:
+            continue
+        wins = [c for c in clients if rx.fullmatch(c["class"] or "") and is_main_window(c, mons)]
+        if not wins:
+            if cfg.get("autostart"):
+                subprocess.Popen(["setsid", "sh", "-c", launch_cmd(app_id)], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+                launched += 1
+            continue
+        wss = [str(w) for w in cfg["workspaces"]]
+        for i, c in enumerate(wins):
+            target = wss[min(i, len(wss) - 1)]
+            if str(c["workspace"]["name"]) != target:
+                subprocess.run(["hyprctl", "dispatch",
+                                f'hl.dsp.window.move({{ window = "address:{c["address"]}", workspace = "{target}", follow = false }})'],
+                               capture_output=True, timeout=3)
+                moved += 1
+    if launched and state.return_to:
+        subprocess.Popen(["setsid", "sh", "-c",
+                          f"sleep 4 && hyprctl dispatch 'hl.dsp.focus({{ workspace = \"{int(state.return_to)}\" }})'"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    return launched, moved
 
 
 # ---------------- daemon ----------------
@@ -285,10 +333,15 @@ def daemon_running():
 
 if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
     print(__doc__.strip() + "\n\nUsage: workspace-apps            open the editor\n"
+          "       workspace-apps --activate start the ▶ apps now and move open windows to their workspaces\n"
           "       workspace-apps --daemon   run the multi-window mover (started automatically)")
     sys.exit(0)
 if len(sys.argv) > 1 and sys.argv[1] == "--daemon":
     run_daemon()
+    sys.exit(0)
+if len(sys.argv) > 1 and sys.argv[1] == "--activate":
+    n_launched, n_moved = activate_now(State())
+    print(f"started {n_launched} app(s), moved {n_moved} window(s)")
     sys.exit(0)
 
 # ---------------- GUI ----------------
@@ -338,6 +391,22 @@ class WorkspaceApps(Adw.Application):
         self.save_btn = Gtk.Button(label="Save & Apply", css_classes=["suggested-action"])
         self.save_btn.connect("clicked", self.on_save)
         header.pack_end(self.save_btn)
+        act = Gtk.Button(label="Activate now", tooltip_text="Save, start the ▶ apps that aren't running, "
+                                                            "and move open windows to their workspaces")
+        act.connect("clicked", self.on_activate)
+        header.pack_end(act)
+
+        login_box = Gtk.Box(spacing=8, margin_end=12)
+        login_box.append(Gtk.Label(label="Start apps at login", css_classes=["hint"]))
+        self.login_switch = Gtk.Switch(active=self.state.autostart_enabled, valign=Gtk.Align.CENTER,
+                                       css_classes=["login-switch"],
+                                       tooltip_text="Green: the ▶ apps start when you log in. Red: nothing starts.")
+        self.login_state = Gtk.Label()
+        self.login_switch.connect("notify::active", self.on_login_toggled)
+        login_box.append(self.login_switch)
+        login_box.append(self.login_state)
+        self.update_login_label()
+        header.pack_start(login_box)
 
         ret_box = Gtk.Box(spacing=6)
         ret_box.append(Gtk.Label(label="After login, go to", css_classes=["hint"]))
@@ -565,11 +634,32 @@ class WorkspaceApps(Adw.Application):
         pop.set_child(box)
         return pop
 
+    def update_login_label(self):
+        on = self.login_switch.get_active()
+        self.login_state.set_label("ON" if on else "OFF")
+        self.login_state.set_css_classes(["login-on" if on else "login-off"])
+
+    def on_login_toggled(self, sw, _p):
+        self.state.autostart_enabled = sw.get_active()
+        self.update_login_label()
+        self.mark_dirty()
+
+    def on_activate(self, *_):
+        if not self.on_save(quiet=True):
+            return
+        launched, moved = activate_now(self.state)
+        if not launched and not moved:
+            msg = ("Everything is already in place" if any(c.get("autostart") for c in self.state.apps.values())
+                   else "Nothing to start: press ▶ on the apps you want started")
+        else:
+            msg = f"Started {launched} app(s), moved {moved} window(s)"
+        self.toasts.add_toast(Adw.Toast(title=msg, timeout=4))
+
     def on_return_changed(self, drop, _p):
         self.state.return_to = drop.get_selected() or None
         self.mark_dirty()
 
-    def on_save(self, *_):
+    def on_save(self, *_, quiet=False):
         try:
             self.state.save()
             write_lua(self.state, self.names)
@@ -580,13 +670,14 @@ class WorkspaceApps(Adw.Application):
             errs = subprocess.run(["hyprctl", "configerrors"], capture_output=True, text=True, timeout=5).stdout.strip()
         except Exception as e:  # noqa: BLE001
             self.toasts.add_toast(Adw.Toast(title=f"Save failed: {e}", timeout=6))
-            return
+            return False
         if errs and "no errors" not in errs.lower():
             self.toasts.add_toast(Adw.Toast(title=f"Saved, but Hyprland reports: {errs.splitlines()[0]}", timeout=8))
-        else:
+        elif not quiet:
             self.toasts.add_toast(Adw.Toast(title="Saved — apps will open on their workspaces"))
         self.dirty = False
         self.save_btn.set_label("Save & Apply")
+        return True
 
     def on_close(self, win):
         if not self.dirty:

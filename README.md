@@ -18,8 +18,14 @@ libadwaita.
   Obsidian on 5, and so on. Super + number takes you straight to the app.
 - **Drag and drop, or click.** Drag an app from the list onto a tile, or click
   the app and then click the tile.
-- **Launch at login (autostart).** Press ▶ on an app and it starts on its
-  workspace every time you log in.
+- **Launch at login (autostart).** Press ▶ on an app (it turns green) and it
+  starts on its workspace every time you log in.
+- **One green/red switch for all of it.** *Start apps at login*: green = your ▶
+  apps start at login, red = nothing starts (your workspace assignments keep
+  working either way).
+- **Activate now.** One click starts your ▶ apps right away, each on its own
+  workspace, and moves windows that are already open to where they belong. It
+  does the same as a fresh login, without logging out.
 - **Choose where you land after login.** For example, start all your apps and
   still end up on workspace 1.
 - **One app, several workspaces.** Drop an app on a 2nd tile and its **2nd
@@ -63,11 +69,46 @@ The installer only copies files into your home directory:
 2. **Assign apps.** Drag an app from the left list onto a workspace tile.
    Or click the app, then click the tile. Use the search box to find apps
    quickly.
-3. **Optional: autostart.** Press **▶** on an app to launch it at login.
-   Use **After login, go to** (top left) to choose which workspace you see
-   once everything has started.
+3. **Optional: autostart.** Press **▶** on an app (it turns green) to start
+   it at login. Use **After login, go to** (top left) to choose which
+   workspace you see once everything has started.
 4. **Press Save & Apply.** Hyprland reloads immediately; no logout needed.
    Open an app and it goes to its workspace.
+5. **Press Activate now** to start the ▶ apps immediately, each on its own
+   workspace, and to move open windows into place.
+
+### Start apps at login: the green/red switch
+
+| Switch | What happens when you log in |
+|---|---|
+| 🟢 **ON** (green) | Every app with a green ▶ starts on its workspace |
+| 🔴 **OFF** (red) | Nothing starts; you open apps yourself, and they still go to their workspaces |
+
+Your ▶ choices are remembered while the switch is off, so turning it back on
+restores them. Press **Save & Apply** after flipping it.
+
+### Activate now
+
+**Activate now** saves, then:
+
+- starts every ▶ app that isn't running yet, on its own workspace,
+- moves windows that are already open but on the wrong workspace to the
+  right one (for apps with two workspaces: window 1 to the first, window 2 to
+  the second),
+- then takes you to the **After login, go to** workspace.
+
+It works whether the login switch is on or off. You can also run it from a
+terminal or a keybinding:
+
+```bash
+workspace-apps --activate
+```
+
+For example, bind it in `~/.config/hypr/bindings.lua` (Omarchy):
+
+```lua
+o.bind("SUPER + SHIFT + W", "Activate workspace apps", os.getenv("HOME") .. "/.local/bin/workspace-apps --activate")
+```
 
 ### Moving and removing
 
@@ -76,6 +117,7 @@ The installer only copies files into your home directory:
 | Move an app to another workspace | Drag its chip from one tile to another tile |
 | Give an app an extra workspace | Drag it from the **left list** onto a second tile |
 | Remove an app from a workspace | Press **✕** on its chip |
+| Start an app at login / with Activate now | Press **▶** on its chip (green = on) |
 
 ### One app on two (or more) workspaces
 
