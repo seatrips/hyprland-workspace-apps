@@ -160,8 +160,13 @@ clients` to see the class of every open window.
 
 Some classes are generic. Java apps that open their window from a background
 thread, like thinkorswim, all get `java-lang-Thread`, so a class-only rule
-would also catch unrelated Java apps. In that case, add a `title` regex to the
-app in `~/.config/hypr/workspace-apps.json`. A window then has to match both:
+would also catch unrelated Java apps. In that case, add a title regex to the
+app with the **⚙** button: fill in **Window title (regex, optional)**, or
+press **T** next to one of the app's open windows to copy its class and title.
+A window then has to match both. The title **T** copies is the full title, so
+trim it to the part that never changes, e.g. `(?i).*thinkorswim.*`.
+
+In `~/.config/hypr/workspace-apps.json` that looks like:
 
 ```json
 "thinkorswim.desktop": {
@@ -173,8 +178,8 @@ app in `~/.config/hypr/workspace-apps.json`. A window then has to match both:
 ```
 
 Both regexes must match the whole class or title, so wrap the title in `.*….*`.
-The GUI keeps this field when you save. To apply a hand edit, open Workspace
-Apps and press **Save & Apply**.
+Leave the title empty to match by class only. If you edit the JSON by hand,
+open Workspace Apps and press **Save & Apply** to apply it.
 
 ## How it works
 

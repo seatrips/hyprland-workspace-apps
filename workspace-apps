@@ -656,7 +656,21 @@ class WorkspaceApps(Adw.Application):
             self.mark_dirty()
         entry.connect("changed", on_entry)
         box.append(entry)
-        box.append(Gtk.Label(label="Guessed from the app. If it doesn't land on its\nworkspace, open the app and pick its window:",
+        box.append(Gtk.Label(label="Window title (regex, optional)", xalign=0, css_classes=["heading"]))
+        title_entry = Gtk.Entry(text=cfg.get("title", ""), width_chars=36, placeholder_text="any title")
+
+        def on_title(e):
+            t = e.get_text().strip()
+            if t:
+                cfg["title"] = t
+            else:
+                cfg.pop("title", None)
+            self.mark_dirty()
+        title_entry.connect("changed", on_title)
+        box.append(title_entry)
+        box.append(Gtk.Label(label="Only needed when other apps share the class\n(e.g. java-lang-Thread). Must match the whole title.",
+                             xalign=0, css_classes=["hint", "caption"]))
+        box.append(Gtk.Label(label="Guessed from the app. If it doesn't land on its\nworkspace, open the app and pick its window\n(T uses its title):",
                              xalign=0, css_classes=["hint", "caption"]))
         pick = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         box.append(pick)
@@ -671,10 +685,16 @@ class WorkspaceApps(Adw.Application):
             if not wins:
                 pick.append(Gtk.Label(label="(no open windows)", xalign=0, css_classes=["dim-label"]))
             for cls, title in wins:
-                b = Gtk.Button(css_classes=["flat"])
+                row = Gtk.Box(spacing=2)
+                b = Gtk.Button(css_classes=["flat"], hexpand=True, tooltip_text="Use this class")
                 b.set_child(Gtk.Label(label=f"{cls}  —  {title[:40]}", xalign=0, ellipsize=Pango.EllipsizeMode.END))
                 b.connect("clicked", lambda _b, c=cls: entry.set_text(re_escape(c)))
-                pick.append(b)
+                row.append(b)
+                tb = Gtk.Button(label="T", css_classes=["flat", "circular"], tooltip_text="Use this class and title")
+                tb.connect("clicked", lambda _b, c=cls, t=title: (entry.set_text(re_escape(c)),
+                                                                   title_entry.set_text(f"(?i).*{re_escape(t)}.*")))
+                row.append(tb)
+                pick.append(row)
         pop.connect("show", fill)
         pop.set_child(box)
         return pop
