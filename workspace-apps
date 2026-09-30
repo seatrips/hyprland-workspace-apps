@@ -1,0 +1,613 @@
+#!/usr/bin/env python3
+"""Workspace Apps — pin installed apps to Hyprland workspaces.
+
+Drag an app (or click it, then click a tile) onto a workspace. Saving writes
+~/.config/hypr/workspace-apps.lua (window rules + optional autostart) and
+reloads Hyprland. State lives in ~/.config/hypr/workspace-apps.json.
+
+An app can own several workspaces: its 1st window goes to the first one, its
+2nd window to the next, and so on. Window rules can't tell windows of the same
+app apart, so `workspace-apps --daemon` (started at login) watches Hyprland's
+event socket and moves the extra windows.
+"""
+
+import fcntl
+import json
+import os
+import re
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+import time
+
+HYPR_DIR = os.path.expanduser("~/.config/hypr")
+STATE_FILE = os.path.join(HYPR_DIR, "workspace-apps.json")
+LUA_FILE = os.path.join(HYPR_DIR, "workspace-apps.lua")
+MAIN_CONF = os.path.join(HYPR_DIR, "hyprland.lua")
+INCLUDE_LINE = 'dofile(os.getenv("HOME") .. "/.config/hypr/workspace-apps.lua") -- Workspace Apps'
+LEGACY_INCLUDES = ('require("hypr.workspace-apps")', "workspace-apps.lua")
+WORKSPACES = range(1, 11)
+SELF = os.path.realpath(__file__)
+APP_ID = "io.github.seatrips.WorkspaceApps"
+LOCK_FILE = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "workspace-apps-daemon.lock")
+
+CSS = """
+.ws-tile {
+  border-radius: 14px;
+  padding: 10px;
+  background: alpha(currentColor, 0.05);
+  border: 2px solid alpha(currentColor, 0.08);
+  min-height: 150px;
+}
+.ws-tile.armed { border-color: alpha(@accent_color, 0.6); }
+.ws-tile:drop(active) {
+  border-color: @accent_color;
+  background: alpha(@accent_color, 0.15);
+}
+.ws-number { font-size: 22px; font-weight: 800; opacity: 0.8; }
+.ws-empty { opacity: 0.4; font-style: italic; }
+.chip {
+  border-radius: 10px;
+  padding: 4px 6px;
+  background: alpha(currentColor, 0.08);
+}
+.chip:hover { background: alpha(currentColor, 0.14); }
+.chip button { min-width: 26px; min-height: 26px; padding: 0; }
+.app-row { padding: 6px 4px; }
+.hint { opacity: 0.7; }
+"""
+
+
+def re_escape(s):
+    return re.sub(r"([.^$*+?()\[\]{}|\\])", r"\\\1", s)
+
+
+def guess_class(app):
+    """Best-effort Hyprland class regex for a desktop entry."""
+    wm = app.get_string("StartupWMClass")
+    if wm and not wm.startswith("@@"):  # skip unsubstituted build placeholders
+        return "(?i)" + re_escape(wm)
+    cmd = app.get_commandline() or ""
+    m = re.search(r"--app=\"?https?://([^/\"\s]+)", cmd) or re.search(
+        r"omarchy-launch-webapp\s+\"?https?://([^/\"\s]+)", cmd
+    )
+    if m:  # Chromium --app windows: chrome-<host>__<path>-Default
+        return "(?i)chrome-" + re_escape(m.group(1)) + "__.*"
+    m = re.search(r"--app-id[= ]\"?([\w.\-]+)", cmd)
+    if m:
+        return re_escape(m.group(1))
+    names = []
+    app_id = (app.get_id() or "").removesuffix(".desktop")
+    if app_id:
+        names.append(app_id)
+    exe = app.get_executable()
+    if exe:
+        base = os.path.basename(exe)
+        if base not in names and base not in ("env", "sh", "bash", "flatpak", "uwsm-app"):
+            names.append(base)
+    if not names:
+        return ""
+    alts = "|".join(re_escape(n) for n in names)
+    return f"(?i)({alts})" if len(names) > 1 else f"(?i){alts}"
+
+
+def lua_str(s):
+    level = "=" * 3
+    while f"]{level}]" in s:
+        level += "="
+    return f"[{level}[{s}]{level}]"
+
+
+def open_window_classes():
+    try:
+        out = subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=3).stdout
+        return sorted({(c.get("class") or "", c.get("title") or "") for c in json.loads(out) if c.get("class")})
+    except Exception:
+        return []
+
+
+class State:
+    def __init__(self):
+        self.apps = {}  # desktop id -> {workspace, autostart, class}
+        self.return_to = 1
+        try:
+            with open(STATE_FILE) as f:
+                data = json.load(f)
+            self.apps = data.get("apps", {})
+            self.return_to = data.get("return_to", 1)
+        except (OSError, ValueError):
+            pass
+        for cfg in self.apps.values():  # older files stored a single "workspace"
+            if "workspaces" not in cfg:
+                cfg["workspaces"] = [cfg.pop("workspace")] if "workspace" in cfg else []
+        self.apps = {a: c for a, c in self.apps.items() if c["workspaces"]}
+
+    def has_multi(self):
+        return any(len(c["workspaces"]) > 1 for c in self.apps.values())
+
+    def save(self):
+        with open(STATE_FILE, "w") as f:
+            json.dump({"return_to": self.return_to, "apps": self.apps}, f, indent=2)
+
+
+def launch_cmd(*argv):
+    """Shell command that starts argv (a desktop entry ID or a program) in the session."""
+    quoted = " ".join(shlex.quote(a) for a in argv)
+    if shutil.which("uwsm-app"):  # UWSM sessions (Omarchy): proper systemd scope
+        return f"uwsm-app -- {quoted}"
+    if argv[0].endswith(".desktop"):
+        return f"gtk-launch {shlex.quote(argv[0].removesuffix('.desktop'))}"
+    return quoted
+
+
+def daemon_cmd():
+    return launch_cmd(SELF, "--daemon")
+
+
+def write_lua(state, names):
+    lines = [
+        "-- Generated by Workspace Apps (https://github.com/seatrips/hyprland-workspace-apps).",
+        "-- Edits here are overwritten: use the app, or ~/.config/hypr/workspace-apps.json.",
+        "",
+    ]
+    by_ws = sorted(state.apps.items(), key=lambda kv: (kv[1]["workspaces"][0], names.get(kv[0], kv[0]).lower()))
+    for app_id, cfg in by_ws:
+        if not cfg.get("class"):
+            continue
+        extra = ""
+        if len(cfg["workspaces"]) > 1:
+            extra = f"  (windows 2+ -> {', '.join(map(str, cfg['workspaces'][1:]))} via daemon)"
+        lines.append(f"-- {names.get(app_id, app_id)}{extra}")
+        lines.append(f'hl.window_rule({{ match = {{ class = {lua_str(cfg["class"])} }}, workspace = "{cfg["workspaces"][0]}" }})')
+
+    startup = []
+    if state.has_multi():
+        startup += ["  -- Moves 2nd/3rd/... windows of multi-workspace apps", f"  hl.exec_cmd({lua_str(daemon_cmd())})"]
+    autostart = [a for a, c in by_ws if c.get("autostart")]
+    if autostart:
+        startup.append("  -- Launch at login")
+        startup += [f"  hl.exec_cmd({lua_str(launch_cmd(a))})" for a in autostart]
+        if state.return_to:
+            cmd = f"sleep 4 && hyprctl dispatch 'hl.dsp.focus({{ workspace = \"{int(state.return_to)}\" }})'"
+            startup.append(f"  hl.exec_cmd({lua_str(cmd)})")
+    if startup:
+        lines += ["", 'hl.on("hyprland.start", function()', *startup, "end)"]
+    with open(LUA_FILE, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def ensure_included():
+    """Load workspace-apps.lua from hyprland.lua (once; backs the file up first)."""
+    with open(MAIN_CONF) as f:
+        text = f.read()
+    if any(s in text for s in LEGACY_INCLUDES):
+        return
+    shutil.copy(MAIN_CONF, f"{MAIN_CONF}.bak.{int(time.time())}")
+    anchor = 'require("hypr.autostart")'  # Omarchy: load right after the user's autostart
+    if anchor in text:
+        text = text.replace(anchor, f"{anchor}\n{INCLUDE_LINE}", 1)
+    else:
+        text = text.rstrip("\n") + f"\n\n{INCLUDE_LINE}\n"
+    with open(MAIN_CONF, "w") as f:
+        f.write(text)
+
+
+# ---------------- daemon ----------------
+
+def hypr_json(*args):
+    out = subprocess.run(["hyprctl", *args, "-j"], capture_output=True, text=True, timeout=3).stdout
+    return json.loads(out)
+
+
+def is_main_window(c, mon_sizes):
+    """Skip dialogs/popups: floating windows that are clearly smaller than a screen."""
+    if not c.get("mapped", True) or not c.get("title"):
+        return False
+    if not c.get("floating"):
+        return True
+    mw, mh = mon_sizes.get(c.get("monitor"), (1920, 1080))
+    w, h = c["size"]
+    return w >= mw * 0.6 and h >= mh * 0.6
+
+
+def handle_open(addr, state):
+    time.sleep(0.4)  # let the window settle (title, floating state)
+    try:
+        clients = hypr_json("clients")
+        mons = {m["id"]: (m["width"] / m["scale"], m["height"] / m["scale"]) for m in hypr_json("monitors")}
+    except Exception:
+        return
+    new = next((c for c in clients if c["address"].removeprefix("0x") == addr.removeprefix("0x")), None)
+    if not new or not is_main_window(new, mons):
+        return
+    for cfg in state.apps.values():
+        wss = cfg["workspaces"]
+        if len(wss) < 2 or not cfg.get("class"):
+            continue
+        try:
+            rx = re.compile(cfg["class"])
+        except re.error:
+            continue
+        if not rx.fullmatch(new["class"] or ""):
+            continue
+        taken = {str(c["workspace"]["name"]) for c in clients
+                 if c["address"] != new["address"] and rx.fullmatch(c["class"] or "") and is_main_window(c, mons)}
+        target = next((str(w) for w in wss if str(w) not in taken), None)
+        if target and target != str(new["workspace"]["name"]):
+            subprocess.run(["hyprctl", "dispatch",
+                            f'hl.dsp.window.move({{ window = "address:{new["address"]}", workspace = "{target}", follow = false }})'],
+                           capture_output=True, timeout=3)
+        return
+
+
+def run_daemon():
+    lock = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return  # already running
+    sock_path = os.path.join(os.environ["XDG_RUNTIME_DIR"], "hypr", os.environ["HYPRLAND_INSTANCE_SIGNATURE"], ".socket2.sock")
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(sock_path)
+    buf = b""
+    state, mtime = None, None
+    while True:
+        chunk = s.recv(4096)
+        if not chunk:
+            return  # Hyprland exited
+        buf += chunk
+        *lines, buf = buf.split(b"\n")
+        for line in lines:
+            ev, _, data = line.decode(errors="replace").partition(">>")
+            if ev != "openwindow":
+                continue
+            try:
+                m = os.path.getmtime(STATE_FILE)
+                if m != mtime:
+                    state, mtime = State(), m
+            except OSError:
+                continue
+            if state.has_multi():
+                handle_open(data.split(",", 1)[0], state)
+
+
+def daemon_running():
+    try:
+        with open(LOCK_FILE, "w") as f:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(f, fcntl.LOCK_UN)
+        return False
+    except OSError:
+        return True
+
+
+if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+    print(__doc__.strip() + "\n\nUsage: workspace-apps            open the editor\n"
+          "       workspace-apps --daemon   run the multi-window mover (started automatically)")
+    sys.exit(0)
+if len(sys.argv) > 1 and sys.argv[1] == "--daemon":
+    run_daemon()
+    sys.exit(0)
+
+# ---------------- GUI ----------------
+
+import gi  # noqa: E402
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+gi.require_version("Pango", "1.0")
+from gi.repository import Adw, Gdk, Gio, GObject, Gtk, Pango  # noqa: E402
+
+
+def drag_source_for(widget, payload):
+    src = Gtk.DragSource(actions=Gdk.DragAction.MOVE | Gdk.DragAction.COPY)
+    src.connect("prepare", lambda *_: Gdk.ContentProvider.new_for_value(GObject.Value(str, payload)))
+    src.connect("drag-begin", lambda s, _d: s.set_icon(Gtk.WidgetPaintable.new(widget), 20, 20))
+    widget.add_controller(src)
+
+
+class WorkspaceApps(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID)
+        self.state = State()
+        self.selected = None
+        self.dirty = False
+
+    # ---------- setup ----------
+    def do_activate(self):
+        if self.props.active_window:
+            self.props.active_window.present()
+            return
+        css = Gtk.CssProvider()
+        css.load_from_string(CSS)
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        self.infos = {}
+        for app in Gio.AppInfo.get_all():
+            if app.should_show() and app.get_id():
+                self.infos[app.get_id()] = app
+        self.names = {k: v.get_display_name() for k, v in self.infos.items()}
+
+        win = Adw.ApplicationWindow(application=self, title="Workspace Apps", default_width=1200, default_height=760)
+        self.win = win
+        self.toasts = Adw.ToastOverlay()
+        view = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        self.save_btn = Gtk.Button(label="Save & Apply", css_classes=["suggested-action"])
+        self.save_btn.connect("clicked", self.on_save)
+        header.pack_end(self.save_btn)
+
+        ret_box = Gtk.Box(spacing=6)
+        ret_box.append(Gtk.Label(label="After login, go to", css_classes=["hint"]))
+        self.ret_drop = Gtk.DropDown.new_from_strings(["stay put"] + [f"workspace {i}" for i in WORKSPACES])
+        self.ret_drop.set_selected(int(self.state.return_to or 0))
+        self.ret_drop.connect("notify::selected", self.on_return_changed)
+        ret_box.append(self.ret_drop)
+        header.pack_start(ret_box)
+        view.add_top_bar(header)
+
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, position=300, shrink_start_child=False)
+        paned.set_start_child(self.build_app_list())
+        paned.set_end_child(self.build_tiles())
+        view.set_content(paned)
+        self.toasts.set_child(view)
+        win.set_content(self.toasts)
+        win.connect("close-request", self.on_close)
+        self.refresh_tiles()
+        win.present()
+
+    def build_app_list(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_start=10, margin_end=6, margin_top=10, margin_bottom=10)
+        self.search = Gtk.SearchEntry(placeholder_text="Search installed apps")
+        self.search.connect("search-changed", lambda *_: self.app_list.invalidate_filter())
+        box.append(self.search)
+        self.hint = Gtk.Label(label="Drag an app onto a workspace — or click it, then click a tile. "
+                              "Put an app on a 2nd tile to send its 2nd window there.", wrap=True, xalign=0, css_classes=["hint", "caption"])
+        box.append(self.hint)
+
+        self.app_list = Gtk.ListBox(css_classes=["navigation-sidebar"], selection_mode=Gtk.SelectionMode.SINGLE)
+        self.app_list.set_filter_func(self.filter_row)
+        for app_id in sorted(self.infos, key=lambda k: self.names[k].lower()):
+            self.app_list.append(self.make_app_row(app_id))
+        self.app_list.connect("row-selected", self.on_row_selected)
+        scroller = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER, child=self.app_list)
+        box.append(scroller)
+        return box
+
+    def make_app_row(self, app_id):
+        row = Gtk.ListBoxRow()
+        row.app_id = app_id
+        h = Gtk.Box(spacing=10, css_classes=["app-row"])
+        h.append(self.icon_for(app_id, 28))
+        h.append(Gtk.Label(label=self.names[app_id], xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END))
+        row.badge = Gtk.Label(css_classes=["dim-label", "caption"])
+        h.append(row.badge)
+        row.set_child(h)
+        drag_source_for(row, f"add:{app_id}")
+        return row
+
+    def build_tiles(self):
+        self.tiles = {}
+        grid = Gtk.FlowBox(row_spacing=12, column_spacing=12, homogeneous=True, min_children_per_line=2,
+                           max_children_per_line=5, selection_mode=Gtk.SelectionMode.NONE, valign=Gtk.Align.START,
+                           margin_start=6, margin_end=12, margin_top=12, margin_bottom=12)
+        for i in WORKSPACES:
+            tile = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, css_classes=["ws-tile"])
+            tile.set_size_request(210, 260)
+            tile.append(Gtk.Label(label=str(i), xalign=0, css_classes=["ws-number"]))
+            body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, vexpand=True)
+            tile.append(Gtk.ScrolledWindow(child=body, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER))
+            tile.body = body
+
+            drop = Gtk.DropTarget.new(GObject.TYPE_STRING, Gdk.DragAction.MOVE | Gdk.DragAction.COPY)
+            drop.connect("drop", lambda _t, value, _x, _y, ws=i: self.on_drop(value, ws) or True)
+            tile.add_controller(drop)
+            click = Gtk.GestureClick()
+            click.connect("released", lambda *_a, ws=i: self.selected and self.assign(self.selected, ws))
+            tile.add_controller(click)
+
+            self.tiles[i] = tile
+            grid.append(tile)
+        return Gtk.ScrolledWindow(child=grid, hexpand=True)
+
+    # ---------- helpers ----------
+    def icon_for(self, app_id, size):
+        app = self.infos.get(app_id)
+        icon = app.get_icon() if app else None
+        img = Gtk.Image.new_from_gicon(icon) if icon else Gtk.Image.new_from_icon_name("application-x-executable")
+        img.set_pixel_size(size)
+        return img
+
+    def filter_row(self, row):
+        q = self.search.get_text().lower()
+        return not q or q in self.names[row.app_id].lower() or q in row.app_id.lower()
+
+    def mark_dirty(self):
+        self.dirty = True
+        self.save_btn.set_label("Save & Apply •")
+
+    # ---------- actions ----------
+    def on_row_selected(self, _lb, row):
+        self.selected = row.app_id if row else None
+        for tile in self.tiles.values():
+            tile.remove_css_class("armed") if not row else tile.add_css_class("armed")
+        if row:
+            self.hint.set_label(f"Now click a workspace for {self.names[row.app_id]}.")
+
+    def on_drop(self, payload, ws):
+        kind, _, rest = payload.partition(":")
+        if kind == "move":  # chip dragged from another tile: move that one slot
+            app_id, _, src = rest.rpartition(":")
+            wss = self.state.apps.get(app_id, {}).get("workspaces", [])
+            if int(src) in wss and ws not in wss:
+                wss[wss.index(int(src))] = ws
+                self.mark_dirty()
+                self.refresh_tiles()
+        elif kind == "add":
+            self.assign(rest, ws)
+
+    def assign(self, app_id, ws):
+        """Add ws to the app's workspaces (a 2nd tile means 'its 2nd window goes here')."""
+        cfg = self.state.apps.get(app_id)
+        if cfg:
+            if ws in cfg["workspaces"]:
+                return
+            cfg["workspaces"].append(ws)
+            if len(cfg["workspaces"]) == 2:
+                self.toasts.add_toast(Adw.Toast(
+                    title=f"{self.names.get(app_id, app_id)}: window 1 → {cfg['workspaces'][0]}, window 2 → {ws}", timeout=4))
+        else:
+            app = self.infos.get(app_id)
+            self.state.apps[app_id] = {"workspaces": [ws], "autostart": False, "class": guess_class(app) if app else ""}
+        self.app_list.unselect_all()
+        self.hint.set_label("Drag an app onto a workspace — or click it, then click a tile.")
+        self.mark_dirty()
+        self.refresh_tiles()
+
+    def unassign(self, app_id, ws):
+        cfg = self.state.apps.get(app_id)
+        if cfg and ws in cfg["workspaces"]:
+            cfg["workspaces"].remove(ws)
+            if not cfg["workspaces"]:
+                self.state.apps.pop(app_id)
+        self.mark_dirty()
+        self.refresh_tiles()
+
+    def refresh_tiles(self):
+        for ws, tile in self.tiles.items():
+            child = tile.body.get_first_child()
+            while child:
+                nxt = child.get_next_sibling()
+                tile.body.remove(child)
+                child = nxt
+            ids = sorted((a for a, c in self.state.apps.items() if ws in c["workspaces"]),
+                         key=lambda a: self.names.get(a, a).lower())
+            if not ids:
+                tile.body.append(Gtk.Label(label="Drop apps here", css_classes=["ws-empty"], vexpand=True))
+            for app_id in ids:
+                tile.body.append(self.make_chip(app_id, ws))
+        row = self.app_list.get_first_child()
+        while row:
+            cfg = self.state.apps.get(row.app_id)
+            row.badge.set_label("→ " + ", ".join(map(str, cfg["workspaces"])) if cfg else "")
+            row = row.get_next_sibling()
+
+    def make_chip(self, app_id, ws):
+        cfg = self.state.apps[app_id]
+        chip = Gtk.Box(spacing=6, css_classes=["chip"])
+        chip.append(self.icon_for(app_id, 20))
+        names = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+        names.append(Gtk.Label(label=self.names.get(app_id, app_id), xalign=0, ellipsize=Pango.EllipsizeMode.END))
+        if len(cfg["workspaces"]) > 1:
+            n = cfg["workspaces"].index(ws) + 1
+            names.append(Gtk.Label(label=f"window {n} of {len(cfg['workspaces'])}", xalign=0, css_classes=["dim-label", "caption"]))
+        chip.append(names)
+
+        if cfg["workspaces"][0] == ws:  # one launch-at-login toggle per app, on its first tile
+            auto = Gtk.ToggleButton(icon_name="media-playback-start-symbolic", active=cfg.get("autostart", False),
+                                    css_classes=["flat", "circular"], tooltip_text="Launch at login")
+
+            def on_auto(b):
+                cfg["autostart"] = b.get_active()
+                self.mark_dirty()
+            auto.connect("toggled", on_auto)
+            chip.append(auto)
+
+        gear = Gtk.MenuButton(icon_name="emblem-system-symbolic", css_classes=["flat", "circular"],
+                              tooltip_text="Window match")
+        gear.set_popover(self.make_match_popover(app_id))
+        chip.append(gear)
+
+        rm = Gtk.Button(icon_name="window-close-symbolic", css_classes=["flat", "circular"], tooltip_text="Remove")
+        rm.connect("clicked", lambda *_: self.unassign(app_id, ws))
+        chip.append(rm)
+
+        if not cfg.get("class"):
+            chip.set_tooltip_text("No window class — set one with the gear button")
+            chip.add_css_class("error")
+        drag_source_for(chip, f"move:{app_id}:{ws}")
+        return chip
+
+    def make_match_popover(self, app_id):
+        cfg = self.state.apps[app_id]
+        pop = Gtk.Popover()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_start=10, margin_end=10, margin_top=10, margin_bottom=10)
+        box.append(Gtk.Label(label="Window class (regex)", xalign=0, css_classes=["heading"]))
+        entry = Gtk.Entry(text=cfg.get("class", ""), width_chars=36)
+
+        def on_entry(e):
+            cfg["class"] = e.get_text().strip()
+            self.mark_dirty()
+        entry.connect("changed", on_entry)
+        box.append(entry)
+        box.append(Gtk.Label(label="Guessed from the app. If it doesn't land on its\nworkspace, open the app and pick its window:",
+                             xalign=0, css_classes=["hint", "caption"]))
+        pick = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        box.append(pick)
+
+        def fill(*_):
+            child = pick.get_first_child()
+            while child:
+                nxt = child.get_next_sibling()
+                pick.remove(child)
+                child = nxt
+            wins = open_window_classes()
+            if not wins:
+                pick.append(Gtk.Label(label="(no open windows)", xalign=0, css_classes=["dim-label"]))
+            for cls, title in wins:
+                b = Gtk.Button(css_classes=["flat"])
+                b.set_child(Gtk.Label(label=f"{cls}  —  {title[:40]}", xalign=0, ellipsize=Pango.EllipsizeMode.END))
+                b.connect("clicked", lambda _b, c=cls: entry.set_text(re_escape(c)))
+                pick.append(b)
+        pop.connect("show", fill)
+        pop.set_child(box)
+        return pop
+
+    def on_return_changed(self, drop, _p):
+        self.state.return_to = drop.get_selected() or None
+        self.mark_dirty()
+
+    def on_save(self, *_):
+        try:
+            self.state.save()
+            write_lua(self.state, self.names)
+            ensure_included()
+            subprocess.run(["hyprctl", "reload"], capture_output=True, timeout=5)
+            if self.state.has_multi() and not daemon_running():
+                subprocess.Popen(["setsid", "sh", "-c", daemon_cmd()], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            errs = subprocess.run(["hyprctl", "configerrors"], capture_output=True, text=True, timeout=5).stdout.strip()
+        except Exception as e:  # noqa: BLE001
+            self.toasts.add_toast(Adw.Toast(title=f"Save failed: {e}", timeout=6))
+            return
+        if errs and "no errors" not in errs.lower():
+            self.toasts.add_toast(Adw.Toast(title=f"Saved, but Hyprland reports: {errs.splitlines()[0]}", timeout=8))
+        else:
+            self.toasts.add_toast(Adw.Toast(title="Saved — apps will open on their workspaces"))
+        self.dirty = False
+        self.save_btn.set_label("Save & Apply")
+
+    def on_close(self, win):
+        if not self.dirty:
+            return False
+        dlg = Adw.AlertDialog(heading="Unsaved changes", body="Save your workspace layout before closing?")
+        dlg.add_response("discard", "Discard")
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("save", "Save")
+        dlg.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
+        dlg.set_response_appearance("discard", Adw.ResponseAppearance.DESTRUCTIVE)
+
+        def done(d, res):
+            r = d.choose_finish(res)
+            if r == "save":
+                self.on_save()
+            if r in ("save", "discard"):
+                self.dirty = False
+                win.close()
+        dlg.choose(win, None, done)
+        return True
+
+
+if __name__ == "__main__":
+    WorkspaceApps().run(None)
