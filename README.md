@@ -156,6 +156,26 @@ app's desktop file, which works for most apps. If one doesn't move:
 You can also type the class as a regex, e.g. `(?i)firefox`. Run `hyprctl
 clients` to see the class of every open window.
 
+### Two apps share a class?
+
+Some classes are generic. Java apps that open their window from a background
+thread, like thinkorswim, all get `java-lang-Thread`, so a class-only rule
+would also catch unrelated Java apps. In that case, add a `title` regex to the
+app in `~/.config/hypr/workspace-apps.json`. A window then has to match both:
+
+```json
+"thinkorswim.desktop": {
+  "workspaces": [4, 5],
+  "autostart": true,
+  "class": "(?i)(install4j-com-devexperts-jnlp-Launcher|java-lang-Thread)",
+  "title": "(?i).*thinkorswim.*"
+}
+```
+
+Both regexes must match the whole class or title, so wrap the title in `.*….*`.
+The GUI keeps this field when you save. To apply a hand edit, open Workspace
+Apps and press **Save & Apply**.
+
 ## How it works
 
 Saving writes three things:

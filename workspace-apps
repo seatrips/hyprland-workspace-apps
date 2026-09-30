@@ -99,6 +99,16 @@ def guess_class(app):
     return f"(?i)({alts})" if len(names) > 1 else f"(?i){alts}"
 
 
+def matcher(cfg):
+    """Predicate for windows of an app: class regex (full match), plus optional title regex (full match)."""
+    try:
+        crx = re.compile(cfg.get("class") or "(?!)")
+        trx = re.compile(cfg["title"]) if cfg.get("title") else None
+    except re.error:
+        return None
+    return lambda c: bool(crx.fullmatch(c.get("class") or "")) and (trx is None or bool(trx.fullmatch(c.get("title") or "")))
+
+
 def lua_str(s):
     level = "=" * 3
     while f"]{level}]" in s:
@@ -198,7 +208,10 @@ def write_lua(state, names):
         if len(cfg["workspaces"]) > 1:
             extra = f"  (windows 2+ -> {', '.join(map(str, cfg['workspaces'][1:]))} via daemon)"
         lines.append(f"-- {names.get(app_id, app_id)}{extra}")
-        lines.append(f'hl.window_rule({{ match = {{ class = {lua_str(cfg["class"])} }}, workspace = "{cfg["workspaces"][0]}" }})')
+        match = f"class = {lua_str(cfg['class'])}"
+        if cfg.get("title"):
+            match += f", title = {lua_str(cfg['title'])}"
+        lines.append(f'hl.window_rule({{ match = {{ {match} }}, workspace = "{cfg["workspaces"][0]}" }})')
 
     startup = []
     if state.has_multi():
@@ -245,11 +258,10 @@ def activate_now(state):
         return 0, 0
     launched = moved = 0
     for app_id, cfg in state.apps.items():
-        try:
-            rx = re.compile(cfg.get("class") or "(?!)")
-        except re.error:
+        match = matcher(cfg)
+        if not match:
             continue
-        wins = [c for c in clients if rx.fullmatch(c["class"] or "") and is_main_window(c, mons)]
+        wins = [c for c in clients if match(c) and is_main_window(c, mons)]
         if not wins:
             if cfg.get("autostart"):
                 subprocess.Popen(["setsid", "sh", "-c", app_launch_cmd(app_id)], stdout=subprocess.DEVNULL,
@@ -303,14 +315,11 @@ def handle_open(addr, state):
         wss = cfg["workspaces"]
         if len(wss) < 2 or not cfg.get("class"):
             continue
-        try:
-            rx = re.compile(cfg["class"])
-        except re.error:
-            continue
-        if not rx.fullmatch(new["class"] or ""):
+        match = matcher(cfg)
+        if not match or not match(new):
             continue
         taken = {str(c["workspace"]["name"]) for c in clients
-                 if c["address"] != new["address"] and rx.fullmatch(c["class"] or "") and is_main_window(c, mons)}
+                 if c["address"] != new["address"] and match(c) and is_main_window(c, mons)}
         target = next((str(w) for w in wss if str(w) not in taken), None)
         if target and target != str(new["workspace"]["name"]):
             subprocess.run(["hyprctl", "dispatch",
