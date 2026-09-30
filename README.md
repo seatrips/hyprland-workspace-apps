@@ -25,7 +25,8 @@ libadwaita.
   working either way).
 - **Activate now.** One click starts your ▶ apps right away, each on its own
   workspace, and moves windows that are already open to where they belong. It
-  does the same as a fresh login, without logging out.
+  does the same as a fresh login, without logging out. Only apps with a green
+  ▶ are started: with no ▶ turned on, Activate now opens nothing.
 - **Choose where you land after login.** For example, start all your apps and
   still end up on workspace 1.
 - **One app, several workspaces.** Drop an app on a 2nd tile and its **2nd
@@ -74,7 +75,8 @@ The installer only copies files into your home directory:
    Or click the app, then click the tile. Use the search box to find apps
    quickly.
 3. **Optional: autostart.** Press **▶** on an app (it turns green) to start
-   it at login. Use **After login, go to** (top left) to choose which
+   it at login and with **Activate now**. Apps without a green ▶ are never
+   started for you; they only go to their workspace when you open them. Use **After login, go to** (top left) to choose which
    workspace you see once everything has started.
 4. **Press Save & Apply.** Hyprland reloads immediately; no logout needed.
    Open an app and it goes to its workspace.
@@ -92,6 +94,11 @@ Your ▶ choices are remembered while the switch is off, so turning it back on
 restores them. Press **Save & Apply** after flipping it.
 
 ### Activate now
+
+> **Activate now only opens apps with a green ▶.** The same ▶ decides what
+> starts at login and what Activate now starts. If no app has ▶ turned on,
+> Activate now (and `workspace-apps --activate`) opens nothing and only moves
+> windows that are already open. Turn on ▶ for the apps you want it to open.
 
 **Activate now** saves, then:
 
