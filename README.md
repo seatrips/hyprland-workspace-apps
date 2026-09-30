@@ -32,6 +32,10 @@ libadwaita.
   window** goes there: the main window on 3 and a second window (like a
   detached chart in thinkorswim) on 4. Handy for trading platforms, IDEs, chat
   apps, or anything that opens more than one window.
+- **Includes Omarchy's default agent.** *Default agent (claude)* sits at the
+  top of the list, so your coding agent (Claude Code, Codex, Gemini, OpenCode…)
+  can have its own workspace and start at login too. It launches with
+  `omarchy agent`.
 - **Handles web apps and terminal apps.** It recognises Chromium `--app` web
   apps (Omarchy's WhatsApp, Discord, YouTube…) and terminal apps started with
   `--app-id`.
@@ -198,6 +202,12 @@ workspace (see `workspace` rules in the Hyprland wiki).
 **Is it an Omarchy plugin?**
 It's a standalone app that fits Omarchy's defaults (it uses `uwsm-app` and
 loads next to Omarchy's own `autostart.lua`), but it doesn't depend on Omarchy.
+
+**Where is my AI agent in the list?**
+On Omarchy, **Default agent (…)** is the first entry. It follows whatever
+`omarchy default agent` is set to, and it matches both `org.omarchy.agent`
+windows (`omarchy agent`) and `org.omarchy.<agent>` windows (keybindings that
+use `tui =`).
 
 **Can I edit `workspace-apps.lua` by hand?**
 It's regenerated on every save, so put your own rules in another file.

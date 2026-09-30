@@ -151,6 +151,35 @@ def launch_cmd(*argv):
     return quoted
 
 
+def virtual_apps():
+    """Launchable things without a desktop entry, shown at the top of the list."""
+    if hasattr(virtual_apps, "cache"):
+        return virtual_apps.cache
+    apps = {}
+    if shutil.which("omarchy-agent"):  # Omarchy's default coding agent (Claude, Codex, ...)
+        try:
+            agent = subprocess.run(["omarchy-default-agent"], capture_output=True, text=True, timeout=3).stdout.strip()
+        except Exception:
+            agent = ""
+        # `omarchy agent` windows are org.omarchy.agent; `tui =` bindings use org.omarchy.<binary>
+        names = "agent" + (f"|{re_escape(agent)}" if agent else "")
+        apps["omarchy-agent"] = {
+            "name": f"Default agent ({agent})" if agent else "Default agent",
+            # first icon the theme has wins; falls back to the usual terminals
+            "icon": [agent or "agent", "utilities-terminal", "com.mitchellh.ghostty", "Alacritty", "kitty",
+                     "foot", "org.gnome.Console", "application-x-executable"],
+            "class": rf"org\.omarchy\.({names})",
+            "launch": "omarchy-agent",
+        }
+    virtual_apps.cache = apps
+    return apps
+
+
+def app_launch_cmd(app_id):
+    v = virtual_apps().get(app_id)
+    return v["launch"] if v else launch_cmd(app_id)
+
+
 def daemon_cmd():
     return launch_cmd(SELF, "--daemon")
 
@@ -177,7 +206,7 @@ def write_lua(state, names):
     autostart = [a for a, c in by_ws if c.get("autostart")] if state.autostart_enabled else []
     if autostart:
         startup.append("  -- Launch at login")
-        startup += [f"  hl.exec_cmd({lua_str(launch_cmd(a))})" for a in autostart]
+        startup += [f"  hl.exec_cmd({lua_str(app_launch_cmd(a))})" for a in autostart]
         if state.return_to:
             cmd = f"sleep 4 && hyprctl dispatch 'hl.dsp.focus({{ workspace = \"{int(state.return_to)}\" }})'"
             startup.append(f"  hl.exec_cmd({lua_str(cmd)})")
@@ -223,7 +252,7 @@ def activate_now(state):
         wins = [c for c in clients if rx.fullmatch(c["class"] or "") and is_main_window(c, mons)]
         if not wins:
             if cfg.get("autostart"):
-                subprocess.Popen(["setsid", "sh", "-c", launch_cmd(app_id)], stdout=subprocess.DEVNULL,
+                subprocess.Popen(["setsid", "sh", "-c", app_launch_cmd(app_id)], stdout=subprocess.DEVNULL,
                                  stderr=subprocess.DEVNULL, start_new_session=True)
                 launched += 1
             continue
@@ -382,6 +411,8 @@ class WorkspaceApps(Adw.Application):
             if app.should_show() and app.get_id():
                 self.infos[app.get_id()] = app
         self.names = {k: v.get_display_name() for k, v in self.infos.items()}
+        self.virtual = virtual_apps()
+        self.names.update({k: v["name"] for k, v in self.virtual.items()})
 
         win = Adw.ApplicationWindow(application=self, title="Workspace Apps", default_width=1200, default_height=760)
         self.win = win
@@ -438,7 +469,7 @@ class WorkspaceApps(Adw.Application):
 
         self.app_list = Gtk.ListBox(css_classes=["navigation-sidebar"], selection_mode=Gtk.SelectionMode.SINGLE)
         self.app_list.set_filter_func(self.filter_row)
-        for app_id in sorted(self.infos, key=lambda k: self.names[k].lower()):
+        for app_id in [*self.virtual, *sorted(self.infos, key=lambda k: self.names[k].lower())]:
             self.app_list.append(self.make_app_row(app_id))
         self.app_list.connect("row-selected", self.on_row_selected)
         scroller = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER, child=self.app_list)
@@ -483,6 +514,10 @@ class WorkspaceApps(Adw.Application):
 
     # ---------- helpers ----------
     def icon_for(self, app_id, size):
+        if app_id in self.virtual:
+            img = Gtk.Image.new_from_gicon(Gio.ThemedIcon.new_from_names(self.virtual[app_id]["icon"]))
+            img.set_pixel_size(size)
+            return img
         app = self.infos.get(app_id)
         icon = app.get_icon() if app else None
         img = Gtk.Image.new_from_gicon(icon) if icon else Gtk.Image.new_from_icon_name("application-x-executable")
@@ -529,7 +564,8 @@ class WorkspaceApps(Adw.Application):
                     title=f"{self.names.get(app_id, app_id)}: window 1 → {cfg['workspaces'][0]}, window 2 → {ws}", timeout=4))
         else:
             app = self.infos.get(app_id)
-            self.state.apps[app_id] = {"workspaces": [ws], "autostart": False, "class": guess_class(app) if app else ""}
+            cls = self.virtual[app_id]["class"] if app_id in self.virtual else guess_class(app) if app else ""
+            self.state.apps[app_id] = {"workspaces": [ws], "autostart": False, "class": cls}
         self.app_list.unselect_all()
         self.hint.set_label("Drag an app onto a workspace — or click it, then click a tile.")
         self.mark_dirty()
