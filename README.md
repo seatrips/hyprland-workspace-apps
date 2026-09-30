@@ -10,7 +10,7 @@ Works on **[Omarchy](https://omarchy.org)** and any **Hyprland 0.55+** setup wit
 the Lua config (`~/.config/hypr/hyprland.lua`). Built with Python, GTK4 and
 libadwaita.
 
-![Workspace Apps: installed apps on the left, workspace tiles on the right](docs/screenshot.png)
+![Workspace Apps: installed apps on the left, workspace tiles on the right, and the ⚙ window-match popover with class and title fields](docs/screenshot.png)
 
 ## What it does
 
