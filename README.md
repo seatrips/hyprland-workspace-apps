@@ -40,6 +40,9 @@ libadwaita.
 - **Handles web apps and terminal apps.** It recognises Chromium `--app` web
   apps (Omarchy's WhatsApp, Discord, YouTube…) and terminal apps started with
   `--app-id`.
+- **Tell apart apps that share a window class.** Match on the window title
+  too, e.g. to keep thinkorswim's rule (class `java-lang-Thread`) from
+  grabbing other Java apps.
 - **Plain config, nothing hidden.** It writes ordinary Hyprland rules to
   `~/.config/hypr/workspace-apps.lua`, which you can read at any time.
 
@@ -129,6 +132,7 @@ o.bind("SUPER + ALT + W", "Activate workspace apps", os.getenv("HOME") .. "/.loc
 | Give an app an extra workspace | Drag it from the **left list** onto a second tile |
 | Remove an app from a workspace | Press **✕** on its chip |
 | Start an app at login / with Activate now | Press **▶** on its chip (green = on) |
+| Change how an app's windows are matched | Press **⚙** on its chip (class and optional title) |
 
 ### One app on two (or more) workspaces
 
@@ -151,10 +155,16 @@ app's desktop file, which works for most apps. If one doesn't move:
 1. Open that app.
 2. In Workspace Apps, press **⚙** on its chip.
 3. Pick the app's window from the **open windows** list. Its class fills in
-   automatically. Press **Save & Apply**.
+   automatically (press **T** instead to copy its title too). Press
+   **Save & Apply**.
 
 You can also type the class as a regex, e.g. `(?i)firefox`. Run `hyprctl
 clients` to see the class of every open window.
+
+The guess goes wrong most often for launchers that run a wrapper script: the
+class is then guessed from the script's name, not from the window it opens.
+Pick the window as above, or add `StartupWMClass=<real class>` to the
+launcher's `.desktop` file so the guess is right next time.
 
 ### Two apps share a class?
 
@@ -194,16 +204,25 @@ Saving writes three things:
 The generated config is plain Hyprland Lua:
 
 ```lua
+-- Mozilla Firefox
 hl.window_rule({ match = { class = [===[(?i)firefox]===] }, workspace = "1" })
-hl.window_rule({ match = { class = [===[(?i)install4j-com-devexperts-jnlp-Launcher]===] }, workspace = "3" })
+-- thinkorswim  (windows 2+ -> 4 via daemon)
+hl.window_rule({ match = { class = [===[(?i)(install4j-com-devexperts-jnlp-Launcher|java-lang-Thread)]===], title = [===[(?i).*thinkorswim.*]===] }, workspace = "3" })
 
 hl.on("hyprland.start", function()
-  hl.exec_cmd([===[uwsm-app -- firefox.desktop]===])
+  -- Moves 2nd/3rd/... windows of multi-workspace apps
   hl.exec_cmd([===[uwsm-app -- /home/you/.local/bin/workspace-apps --daemon]===])
+  -- Launch at login
+  hl.exec_cmd([===[uwsm-app -- firefox.desktop]===])
+  hl.exec_cmd([===[uwsm-app -- thinkorswim.desktop]===])
+  hl.exec_cmd([===[sleep 4 && hyprctl dispatch 'hl.dsp.focus({ workspace = "1" })']===])
 end)
 ```
 
-- **Window rules** send each app to its (first) workspace.
+- **Window rules** send each app to its (first) workspace. An app with a
+  title regex gets a rule that needs both class and title to match.
+- **After login, go to** is the last line: once the apps have started, it
+  switches to that workspace.
 - **Autostart** uses `uwsm-app` when available (Omarchy), otherwise `gtk-launch`.
 - **Multiple workspaces per app:** window rules can't tell two windows of the
   same app apart, so a tiny background helper (`workspace-apps --daemon`)

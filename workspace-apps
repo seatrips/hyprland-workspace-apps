@@ -9,6 +9,9 @@ An app can own several workspaces: its 1st window goes to the first one, its
 2nd window to the next, and so on. Window rules can't tell windows of the same
 app apart, so `workspace-apps --daemon` (started at login) watches Hyprland's
 event socket and moves the extra windows.
+
+Windows are matched by class regex, plus an optional title regex for apps
+whose class is shared with other apps (e.g. Java's java-lang-Thread).
 """
 
 import fcntl
