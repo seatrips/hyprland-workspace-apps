@@ -82,8 +82,8 @@ def guess_class(app):
     m = re.search(r"--app=\"?https?://([^/\"\s]+)", cmd) or re.search(
         r"omarchy-launch-webapp\s+\"?https?://([^/\"\s]+)", cmd
     )
-    if m:  # Chromium --app windows: chrome-<host>__<path>-Default
-        return "(?i)chrome-" + re_escape(m.group(1)) + "__.*"
+    if m:  # Chromium-family --app windows: chrome-/brave-/msedge-<host>__<path>-Default
+        return "(?i)[a-z]+-" + re_escape(m.group(1)) + "__.*"
     m = re.search(r"--app-id[= ]\"?([\w.\-]+)", cmd)
     if m:
         return re_escape(m.group(1))

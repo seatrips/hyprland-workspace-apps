@@ -37,9 +37,9 @@ libadwaita.
   top of the list, so your coding agent (Claude Code, Codex, Gemini, OpenCode…)
   can have its own workspace and start at login too. It launches with
   `omarchy agent`.
-- **Handles web apps and terminal apps.** It recognises Chromium `--app` web
-  apps (Omarchy's WhatsApp, Discord, YouTube…) and terminal apps started with
-  `--app-id`.
+- **Handles web apps and terminal apps.** It recognises `--app` web apps
+  (Omarchy's WhatsApp, Discord, YouTube…) in any Chromium-based browser
+  (Chromium, Chrome, Brave, Edge…) and terminal apps started with `--app-id`.
 - **Tell apart apps that share a window class.** Match on the window title
   too, e.g. to keep thinkorswim's rule (class `java-lang-Thread`) from
   grabbing other Java apps.
