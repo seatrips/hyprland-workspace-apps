@@ -84,6 +84,9 @@ def guess_class(app):
     )
     if m:  # Chromium-family --app windows: chrome-/brave-/msedge-<host>__<path>-Default
         return "(?i)[a-z]+-" + re_escape(m.group(1)) + "__.*"
+    m = re.search(r"firefox-webapp\s+\"?https?://([^/\"\s?:]+)", cmd)
+    if m:  # firefox-webapp <url> windows: webapp-<host without www.>
+        return "(?i)webapp-" + re_escape(m.group(1).removeprefix("www."))
     m = re.search(r"--app-id[= ]\"?([\w.\-]+)", cmd)
     if m:
         return re_escape(m.group(1))
