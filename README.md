@@ -73,6 +73,21 @@ The installer only copies files into your home directory:
 | `~/.local/bin/workspace-apps` | the app |
 | `~/.local/share/applications/workspace-apps.desktop` | makes it show up in your app launcher |
 
+### As a pacman package (Arch / Omarchy)
+
+Prefer your package manager? Build it from the included PKGBUILD. pacman then
+installs the dependencies and can remove it cleanly later:
+
+```bash
+git clone https://github.com/seatrips/hyprland-workspace-apps.git
+cd hyprland-workspace-apps/packaging/arch
+makepkg -si
+```
+
+This installs `/usr/bin/workspace-apps` and the launcher entry. Remove it with
+`sudo pacman -R hyprland-workspace-apps`. Use either this or `./install.sh`, not
+both: run `./uninstall.sh` first if you used the installer before.
+
 ## How to use
 
 1. **Open it.** Search for **Workspace Apps** in your launcher (on Omarchy:

@@ -1,0 +1,32 @@
+# Maintainer: seatrips <19497657+seatrips@users.noreply.github.com>
+pkgname=hyprland-workspace-apps
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Drag-and-drop GUI that gives every app its own Hyprland workspace (window rules, autostart, multi-window apps); for Omarchy and Hyprland 0.55+ (Lua)"
+arch=('any')
+url="https://github.com/seatrips/hyprland-workspace-apps"
+license=('MIT')
+depends=('python' 'python-gobject' 'gtk4' 'libadwaita' 'hyprland')
+optdepends=('uwsm: start apps in their own systemd scope (Omarchy uses it)')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('a7bc06484d1db58b5752d4cc573c62b4344a293b796b8a41f93d5726e878ed73')
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 workspace-apps "$pkgdir/usr/bin/workspace-apps"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/workspace-apps.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Workspace Apps
+GenericName=Assign apps to workspaces
+Comment=Pin apps to Hyprland workspaces with drag and drop
+Exec=workspace-apps
+Icon=view-grid-symbolic
+Terminal=false
+Categories=Settings;Utility;
+Keywords=hyprland;workspace;window;rules;autostart;omarchy;
+StartupWMClass=io.github.seatrips.WorkspaceApps
+DESKTOP
+}
